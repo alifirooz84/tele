@@ -1,26 +1,44 @@
+require('dotenv').config();
+const fs = require('fs');
+const path = require('path');
 const TelegramBot = require('node-telegram-bot-api');
 const axios = require('axios');
 
-// ====== اینها را خودت جایگزین کن ======
-const TELEGRAM_TOKEN = '7956714963:AAHnybhfhA3c0d7C1VJnXIHhbR-fkeTsXfI';
-const GRAVITY_FORM_API_URL = 'https://pestehiran.shop/wp-json/gf/v2/forms/1/submissions';
-const GRAVITY_API_USER = 'ck_c41df7e26cdcfcf53c467b77a62b13e91f4343fc';
-const GRAVITY_API_PASS = 'cs_539bbe6f6d5e524b984d4a658d1d698c75574295';
+const botToken = process.env.BOT_TOKEN;
+const gravityUsername = process.env.GF_USERNAME;
+const gravityPassword = process.env.GF_PASSWORD;
+const formId = process.env.GF_FORM_ID;
+const gravityUrl = process.env.GF_API_URL;
 
-// اطلاعات کارشناسان (نام و شماره)
-// میتونی هر تعداد اضافه کنی
-const salesExperts = {
-  // شماره کارشناس => نام کارشناس
-  "09170324187": "علی فیروز",
-  "شماره_کارشناس_دوم": "نام_کارشناس_دوم"
-};
+if (!botToken || !gravityUsername || !gravityPassword || !formId || !gravityUrl) {
+  console.error("لطفا مقادیر .env را کامل و صحیح وارد کنید.");
+  process.exit(1);
+}
 
-// حافظه موقت برای ذخیره وضعیت چت‌ها (تا ربات ریست نشه)
-// فرمت: chatId: { expertNumber: '...', step: 'awaiting_customer_number' یا 'awaiting_expert_number' یا 'done' }
-const chatMemory = {};
+const bot = new TelegramBot(botToken, { polling: true });
 
-// ساخت ربات (Polling)
-const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
+// حافظه ساده برای نگهداری شماره کارشناسان (json)
+const dataFile = path.join(__dirname, 'users.json');
+let users = {};
+
+// بارگذاری حافظه از فایل
+if (fs.existsSync(dataFile)) {
+  try {
+    users = JSON.parse(fs.readFileSync(dataFile, 'utf8'));
+  } catch {
+    users = {};
+  }
+}
+
+// ذخیره حافظه در فایل
+function saveUsers() {
+  fs.writeFileSync(dataFile, JSON.stringify(users, null, 2));
+}
+
+// داده‌های نمونه کارشناسان از قبل
+// اگر می‌خواهید دستی وارد کنید اینجا اضافه کنید مثل:
+// users = { "<chat_id>": { name: "علی فیروز", phone: "09170324187" } };
+// ولی این کد به صورت تعاملی می‌گیرد
 
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
@@ -28,65 +46,62 @@ bot.on('message', async (msg) => {
 
   if (!text) return;
 
-  if (!chatMemory[chatId]) {
-    // کاربر برای اولین بار پیام داده، ازش شماره کارشناس بپرس
-    chatMemory[chatId] = {
-      step: 'awaiting_expert_number',
-      expertNumber: null
-    };
-    bot.sendMessage(chatId, 'لطفاً شماره تلفن کارشناس فروش خود را وارد کنید:');
-    return;
-  }
-
-  const userData = chatMemory[chatId];
-
-  if (userData.step === 'awaiting_expert_number') {
-    // ذخیره شماره کارشناس و چک کردن
-    if (salesExperts[text]) {
-      userData.expertNumber = text;
-      userData.step = 'awaiting_customer_number';
-      bot.sendMessage(chatId, `کارشناس شما: ${salesExperts[text]}. حالا شماره مشتری را وارد کنید:`);
-    } else {
-      bot.sendMessage(chatId, 'شماره کارشناس معتبر نیست. لطفاً شماره صحیح را وارد کنید:');
+  // اگر کاربر جدید است، ازش شماره کارشناس را بگیر
+  if (!users[chatId] || !users[chatId].phone) {
+    if (!/^\d{8,15}$/.test(text.replace(/\D/g, ''))) {
+      // شماره معتبر نداد، درخواست دوباره
+      return bot.sendMessage(chatId, 'لطفا شماره تلفن همراه خود (کارشناس فروش) را فقط به صورت عددی وارد کنید.');
     }
-    return;
+    // ذخیره شماره کارشناسی
+    users[chatId] = { phone: text.replace(/\D/g, ''), name: null };
+    saveUsers();
+    return bot.sendMessage(chatId, 'شماره کارشناس ثبت شد. حالا لطفا نام خود را وارد کنید:');
   }
 
-  if (userData.step === 'awaiting_customer_number') {
-    // شماره مشتری دریافت شد، ارسال به گرویتی فرم
-    const customerNumber = text;
-    const expertNumber = userData.expertNumber;
-    const expertName = salesExperts[expertNumber];
+  // اگر شماره ثبت شده ولی نام ثبت نشده
+  if (users[chatId] && !users[chatId].name) {
+    users[chatId].name = text;
+    saveUsers();
+    return bot.sendMessage(chatId, `نام شما ثبت شد: ${text}\nحالا شماره مشتری را وارد کنید:`);
+  }
 
+  // وقتی نام و شماره کارشناس ثبت شده، منتظر شماره مشتری هستیم
+  if (users[chatId].name && users[chatId].phone) {
+    // شماره مشتری را دریافت می‌کنیم و ارسال به گرویتی فرم
+    if (!/^\d{8,15}$/.test(text.replace(/\D/g, ''))) {
+      return bot.sendMessage(chatId, 'لطفا شماره مشتری را فقط به صورت عددی وارد کنید.');
+    }
+    const customerPhone = text.replace(/\D/g, '');
+
+    // ارسال به گرویتی فرم
     try {
-      await axios.post(GRAVITY_FORM_API_URL, {
+      const dataToSend = {
         input_values: {
-          5: customerNumber,  // شماره مشتری
-          6: expertName       // نام کارشناس
+          5: customerPhone,          // فیلد شماره مشتری
+          6: users[chatId].name     // فیلد نام کارشناس
         }
-      }, {
+      };
+
+      const response = await axios.post(gravityUrl, dataToSend, {
         auth: {
-          username: GRAVITY_API_USER,
-          password: GRAVITY_API_PASS
+          username: gravityUsername,
+          password: gravityPassword,
+        },
+        headers: {
+          'Content-Type': 'application/json'
         }
       });
-      bot.sendMessage(chatId, 'اطلاعات با موفقیت ثبت شد. ممنون از شما!');
-      userData.step = 'done';
+
+      if (response.status === 201 || response.status === 200) {
+        bot.sendMessage(chatId, `اطلاعات مشتری با شماره ${customerPhone} با موفقیت ارسال شد.`);
+      } else {
+        bot.sendMessage(chatId, 'خطا در ارسال اطلاعات به فرم. لطفا دوباره تلاش کنید.');
+      }
     } catch (error) {
       console.error('خطا در ارسال به گرویتی فرم:', error.response?.data || error.message);
-      bot.sendMessage(chatId, '❌ خطا در ارسال اطلاعات به فرم. لطفاً دوباره تلاش کنید.');
+      bot.sendMessage(chatId, `❌ خطا در ارسال اطلاعات به فرم.\n${error.response?.data?.message || error.message}`);
     }
-    return;
-  }
 
-  if (userData.step === 'done') {
-    bot.sendMessage(chatId, 'اطلاعات قبلا ثبت شده. اگر می‌خواهید مجدداً ثبت کنید، لطفاً /start را ارسال کنید.');
+    return; // برای جلوگیری از ادامه پیام‌ها
   }
-});
-
-// دستور /start برای ریست کردن حافظه و شروع مجدد
-bot.onText(/\/start/, (msg) => {
-  const chatId = msg.chat.id;
-  chatMemory[chatId] = null;
-  bot.sendMessage(chatId, 'ربات ریست شد. لطفاً شماره تلفن کارشناس فروش خود را وارد کنید:');
 });
